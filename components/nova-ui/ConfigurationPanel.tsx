@@ -8,8 +8,8 @@ import {
   BotMessageSquare,
   Zap,
 } from "lucide-react"
-import { useState } from "react"
 import SliderControl from "./SliderControl"
+import { useNovaStore } from "@/store/useNovaStore"
 
 interface ConfigurationPanelProps {
   glassClasses: string
@@ -18,16 +18,10 @@ interface ConfigurationPanelProps {
 export default function ConfigurationPanel({
   glassClasses,
 }: ConfigurationPanelProps) {
-  // Mock State for sliders
-  const [config, setConfig] = useState({
-    outfit: 4, // Represents V.04
-    color: 50, // Neon (0-100)
-    humor: 85, // 85%
-    formality: 10, // LOW
-    empathy: 95, // MAX
-  })
+  // Now reads from AND writes to the store — sliders actually affect Nova
+  const { personality, setPersonality, clearHistory } = useNovaStore()
 
-  const getCustomValueText = (key: keyof typeof config, value: number) => {
+  const getCustomValueText = (key: keyof typeof personality, value: number) => {
     switch (key) {
       case "outfit":
         return `V .0${value}`
@@ -53,53 +47,51 @@ export default function ConfigurationPanel({
         </p>
       </div>
 
-      {/* Sliders Area */}
       <div className="flex flex-col gap-7 pt-2">
         <SliderControl
           label="Outfit"
           icon={BotMessageSquare}
           min={1}
           max={10}
-          value={config.outfit}
-          onChange={(v) => setConfig({ ...config, outfit: v })}
+          value={personality.outfit}
+          onChange={(v) => setPersonality({ outfit: v })}
           isValueCustomText
-          valueText={getCustomValueText("outfit", config.outfit)}
+          valueText={getCustomValueText("outfit", personality.outfit)}
         />
         <SliderControl
           label="Color"
           icon={Sparkles}
-          value={config.color}
-          onChange={(v) => setConfig({ ...config, color: v })}
+          value={personality.color}
+          onChange={(v) => setPersonality({ color: v })}
           isValueCustomText
-          valueText={getCustomValueText("color", config.color)}
+          valueText={getCustomValueText("color", personality.color)}
         />
         <SliderControl
           label="Humor"
           icon={Brain}
-          value={config.humor}
-          onChange={(v) => setConfig({ ...config, humor: v })}
+          value={personality.humor}
+          onChange={(v) => setPersonality({ humor: v })}
+          valueText={`${personality.humor}%`}
           displayValueSuffix="%"
-          valueText={`${config.humor}%`}
         />
         <SliderControl
           label="Formality"
           icon={Scale}
-          value={config.formality}
-          onChange={(v) => setConfig({ ...config, formality: v })}
+          value={personality.formality}
+          onChange={(v) => setPersonality({ formality: v })}
           isValueCustomText
-          valueText={getCustomValueText("formality", config.formality)}
+          valueText={getCustomValueText("formality", personality.formality)}
         />
         <SliderControl
           label="Empathy"
           icon={Heart}
-          value={config.empathy}
-          onChange={(v) => setConfig({ ...config, empathy: v })}
+          value={personality.empathy}
+          onChange={(v) => setPersonality({ empathy: v })}
           isValueCustomText
-          valueText={getCustomValueText("empathy", config.empathy)}
+          valueText={getCustomValueText("empathy", personality.empathy)}
         />
       </div>
 
-      {/* Neural State Bar */}
       <div className="flex items-center justify-between mt-6 px-5 py-4 bg-cyan-950/20 border border-cyan-800/40 rounded-full">
         <div className="flex items-center gap-3">
           <Zap className="w-5 h-5 text-cyan-500" />
@@ -112,8 +104,11 @@ export default function ConfigurationPanel({
         </span>
       </div>
 
-      {/* Active Memory */}
-      <div className="flex items-center justify-between text-white/40 px-5 pt-1 pb-1">
+      {/* Clear Memory Button — wired to store */}
+      <button
+        onClick={clearHistory}
+        className="flex items-center justify-between text-white/40 hover:text-white/70 transition px-5 pt-1 pb-1 cursor-pointer w-full"
+      >
         <div className="flex items-center gap-3">
           <Zap className="w-4 h-4 text-white/30" />
           <span className="text-xs font-medium tracking-wide">
@@ -121,9 +116,9 @@ export default function ConfigurationPanel({
           </span>
         </div>
         <span className="text-xs font-mono uppercase tracking-widest">
-          12.4TB
+          CLEAR
         </span>
-      </div>
+      </button>
     </div>
   )
 }
