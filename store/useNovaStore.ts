@@ -2,8 +2,8 @@ import { create } from "zustand"
 import { persist } from "zustand/middleware"
 
 export type NovaState = "IDLE" | "LISTENING" | "THINKING" | "SPEAKING"
+export type Provider = "gemini" | "groq" | null
 
-// Standard Anthropic message shape
 export interface ChatMessage {
   role: "user" | "assistant"
   content: string
@@ -19,12 +19,14 @@ export interface PersonalityConfig {
 
 interface NovaStore {
   currentState: NovaState
+  currentProvider: Provider
   userTranscript: string
   novaResponse: string
   personality: PersonalityConfig
   conversationHistory: ChatMessage[]
 
   setCurrentState: (state: NovaState) => void
+  setCurrentProvider: (provider: Provider) => void
   setTranscripts: (user: string, nova: string) => void
   setPersonality: (config: Partial<PersonalityConfig>) => void
   addToHistory: (message: ChatMessage) => void
@@ -32,10 +34,11 @@ interface NovaStore {
 }
 
 export const useNovaStore = create<NovaStore>()(
-  // `persist` saves to localStorage automatically — this is Nova's memory across page reloads
   persist(
     (set) => ({
+      // ─── Initial State ──────────────────────────────────────────────────
       currentState: "IDLE",
+      currentProvider: null,
       userTranscript: "",
       novaResponse: "",
       conversationHistory: [],
@@ -47,7 +50,10 @@ export const useNovaStore = create<NovaStore>()(
         empathy: 95,
       },
 
+      // ─── Actions ────────────────────────────────────────────────────────
       setCurrentState: (state) => set({ currentState: state }),
+
+      setCurrentProvider: (provider) => set({ currentProvider: provider }),
 
       setTranscripts: (user, nova) =>
         set({ userTranscript: user, novaResponse: nova }),
@@ -57,7 +63,8 @@ export const useNovaStore = create<NovaStore>()(
           personality: { ...state.personality, ...config },
         })),
 
-      // Keep last 20 exchanges (40 messages) to avoid token bloat
+      // Keep last 40 messages (20 exchanges) to avoid token bloat.
+      // slice(-38) + the incoming message = max 39, safely under 40.
       addToHistory: (message) =>
         set((state) => ({
           conversationHistory: [
@@ -70,7 +77,8 @@ export const useNovaStore = create<NovaStore>()(
     }),
     {
       name: "nova-memory", // localStorage key
-      // Only persist what makes sense across sessions
+      // Only persist what makes sense across sessions.
+      // currentState, currentProvider, transcripts are session-only.
       partialize: (state) => ({
         personality: state.personality,
         conversationHistory: state.conversationHistory,

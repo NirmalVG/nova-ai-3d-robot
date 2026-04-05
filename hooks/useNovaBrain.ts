@@ -13,6 +13,7 @@ declare global {
 export function useNovaBrain() {
   const {
     setCurrentState,
+    setCurrentProvider,
     setTranscripts,
     personality,
     conversationHistory,
@@ -135,11 +136,14 @@ export function useNovaBrain() {
         const { text, provider } = await res.json()
         console.log(`🤖 Nova replied via ${provider}:`, text)
 
+        // Update HUD provider badge
+        setCurrentProvider(provider)
+
         addToHistory({ role: "assistant", content: text })
         speakResponse(text, userText)
       } catch (err) {
         console.error("💥 Nova brain error:", err)
-        // Always recover to a speaking state so THINKING never gets stuck
+        // Always recover to SPEAKING so THINKING never gets permanently stuck
         speakResponse(
           "My neural link encountered an error. Please try again.",
           userText,
@@ -148,6 +152,7 @@ export function useNovaBrain() {
     },
     [
       setCurrentState,
+      setCurrentProvider,
       setTranscripts,
       personality,
       conversationHistory,
@@ -201,9 +206,7 @@ export function useNovaBrain() {
       window.SpeechRecognition || window.webkitSpeechRecognition
 
     if (!SpeechRecognition) {
-      alert(
-        "Voice not supported in this browser. Use the text input or switch to Chrome/Edge.",
-      )
+      alert("Voice not supported. Use Chrome or Edge.")
       return
     }
 
@@ -216,44 +219,84 @@ export function useNovaBrain() {
     recognitionRef.current = recognition
 
     recognition.lang = "en-US"
-    recognition.interimResults = false
-    recognition.maxAlternatives = 1
     recognition.continuous = false
+    recognition.maxAlternatives = 1
+
+    // interimResults: true streams partial results as you speak.
+    // This gives us a fallback if the final result never fires
+    // (common when Google STT has network hiccups).
+    recognition.interimResults = true
+
+    let lastInterimTranscript = ""
+    let finalResultFired = false
 
     recognition.onstart = () => {
       console.log("🎤 Listening started")
+      lastInterimTranscript = ""
+      finalResultFired = false
       setCurrentState("LISTENING")
     }
 
     recognition.onresult = (event: any) => {
-      const userText = event.results[0][0].transcript
-      const confidence = event.results[0][0].confidence
-      console.log(
-        `🎤 Heard: "${userText}" (confidence: ${confidence.toFixed(2)})`,
-      )
-      askNova(userText)
+      let interimTranscript = ""
+      let finalTranscript = ""
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const transcript = event.results[i][0].transcript
+        if (event.results[i].isFinal) {
+          finalTranscript += transcript
+        } else {
+          interimTranscript += transcript
+        }
+      }
+
+      if (interimTranscript) {
+        lastInterimTranscript = interimTranscript
+        console.log(`🎤 Interim: "${interimTranscript}"`)
+      }
+
+      if (finalTranscript) {
+        finalResultFired = true
+        const confidence = event.results[event.results.length - 1][0].confidence
+        console.log(
+          `🎤 Final: "${finalTranscript}" (confidence: ${confidence.toFixed(2)})`,
+        )
+        askNova(finalTranscript.trim())
+      }
     }
 
     // onspeechend fires BEFORE onresult — do not stop recognition here
-    // or the result gets killed before it can come back
+    // or the result gets killed before it can return
     recognition.onspeechend = () => {
-      console.log("🎤 Speech ended, waiting for result...")
+      console.log("🎤 Speech ended, waiting for final result...")
     }
 
     recognition.onend = () => {
-      console.log("🎤 Recognition session ended")
+      console.log("🎤 Recognition ended. Final fired:", finalResultFired)
       recognitionRef.current = null
-      // Only reset to IDLE if still in LISTENING — if onresult already
-      // fired we'll be in THINKING or SPEAKING and shouldn't touch state
-      if (useNovaStore.getState().currentState === "LISTENING") {
-        setCurrentState("IDLE")
+
+      // If onresult final never fired but we captured interim text,
+      // use that — better than dropping the utterance entirely
+      if (!finalResultFired && lastInterimTranscript.trim()) {
+        console.log(
+          `🎤 Using interim fallback: "${lastInterimTranscript.trim()}"`,
+        )
+        askNova(lastInterimTranscript.trim())
+        return
+      }
+
+      // Nothing captured at all — reset to idle
+      if (!finalResultFired) {
+        if (useNovaStore.getState().currentState === "LISTENING") {
+          setCurrentState("IDLE")
+        }
       }
     }
 
     recognition.onerror = (event: any) => {
       recognitionRef.current = null
 
-      // no-speech just means the user was silent — not a real error
+      // no-speech means user was silent — not a real error
       if (event.error === "no-speech") {
         console.log("🎤 No speech detected — timed out")
         setCurrentState("IDLE")
@@ -261,10 +304,23 @@ export function useNovaBrain() {
       }
 
       if (event.error === "not-allowed") {
-        alert(
-          "Microphone access denied. Allow it in your browser settings and try again.",
-        )
+        alert("Microphone access denied. Allow it in browser settings.")
         setCurrentState("IDLE")
+        return
+      }
+
+      // network error means Google STT servers unreachable —
+      // use interim fallback if we captured anything
+      if (event.error === "network") {
+        console.warn("🎤 Network error — Google STT unreachable")
+        if (lastInterimTranscript.trim()) {
+          console.log(
+            `🎤 Using interim fallback: "${lastInterimTranscript.trim()}"`,
+          )
+          askNova(lastInterimTranscript.trim())
+        } else {
+          setCurrentState("IDLE")
+        }
         return
       }
 

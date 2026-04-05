@@ -6,7 +6,6 @@ import ChatSubtitles from "./ChatSubtitles"
 import DateTimeDisplay from "./DateTimeDisplay"
 import InteractionDock from "./InteractionDock"
 import ConfigurationPanel from "./ConfigurationPanel"
-import DebugInput from "./DebugInput"
 
 interface NovaLayoutProps {
   children?: ReactNode
@@ -48,11 +47,6 @@ export default function NovaLayout({ children }: NovaLayoutProps) {
         {/* Subtitles Area — sits above the dock */}
         <div className="absolute bottom-44 left-1/2 -translate-x-1/2 pointer-events-auto w-full px-4">
           <ChatSubtitles />
-        </div>
-
-        {/* Debug Input — temporary, remove after confirming pipeline works */}
-        <div className="absolute bottom-36 left-1/2 -translate-x-1/2 pointer-events-auto">
-          <DebugInput />
         </div>
 
         {/* Date Time Display — bottom left, desktop only */}
