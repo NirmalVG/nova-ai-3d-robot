@@ -28,9 +28,12 @@ const STATE_EMISSIVE_INTENSITY: Record<string, number> = {
   SPEAKING: 1.0,
 }
 
+// Base position — Nova is shifted left so she sits behind the mic button
+// in the visible area left of the config panel (~360px on the right).
+const BASE_X = -2.0 // model offset — camera stays at 0
+const BASE_Y = -0.5 // raise her up — she's too low
+
 // ─── Cursor Tracker ───────────────────────────────────────────────────────────
-// Converts mouse position to normalised -1..1 range so head tracking
-// works regardless of screen resolution.
 
 function useCursorTarget() {
   const cursorRef = useRef(new THREE.Vector2(0, 0))
@@ -56,7 +59,9 @@ function NovaModel() {
   const { actions, names } = useAnimations(animations, scene)
   const cursorRef = useCursorTarget()
 
-  // Bone refs — populated once the model loads
+  // Using Object3D instead of Bone — Bone extends Object3D and we only
+  // need name/rotation/position. Avoids TypeScript narrowing issues
+  // when Three.js types conflict across R3F module boundaries.
   const headBoneRef = useRef<THREE.Object3D | null>(null)
   const spineBoneRef = useRef<THREE.Object3D | null>(null)
   const neckBoneRef = useRef<THREE.Object3D | null>(null)
@@ -79,6 +84,19 @@ function NovaModel() {
     neckBoneRef.current = null
     spineBoneRef.current = null
 
+    // ── Override any rotation/scale baked into the GLB on export ──────────
+    // Some Mixamo/Blender exporters bake transforms onto the root scene
+    // object. We reset everything so Nova is upright and forward-facing.
+    scene.rotation.set(0, 0, 0)
+    scene.scale.set(1, 1, 1)
+    scene.position.set(BASE_X, BASE_Y, 0)
+
+    // If Nova appears sideways or lying flat, uncomment the correct line:
+    // scene.rotation.set(-Math.PI / 2, 0, 0)  // lying flat on back
+    // scene.rotation.set(0, Math.PI, 0)        // facing away from camera
+    // scene.rotation.set(0, Math.PI / 2, 0)   // facing left
+    // scene.rotation.set(0, -Math.PI / 2, 0)  // facing right
+
     // ── Play idle animation ────────────────────────────────────────────────
     if (names.length > 0) {
       const action = actions[names[0]]
@@ -86,36 +104,36 @@ function NovaModel() {
     }
 
     // ── Find bones + collect materials ────────────────────────────────────
-    // Use isBone / isMesh flags instead of instanceof — avoids TypeScript
-    // narrowing to never when R3F and Three.js types conflict across
-    // module boundaries.
     scene.traverse((obj) => {
       if ((obj as THREE.Bone).isBone) {
+        // Cast to Object3D — has name + rotation, avoids Bone type issues
         const bone = obj as THREE.Object3D
         const name = bone.name
 
-        // Exact Mixamo name matching — prevents end-effector bones like
-        // mixamorigHeadTop_End from winning over the real head bone
-        if (name === "mixamorigHead" || name === "Head" || name === "head") {
+        // Use startsWith — this model appends numeric suffixes like _06.
+        // e.g. mixamorigHead_06, mixamorigNeck_05, mixamorigSpine2_04.
+        // Exclude HeadTop explicitly so the end-effector doesn't win.
+        if (
+          name.startsWith("mixamorigHead") &&
+          !name.startsWith("mixamorigHeadTop")
+        ) {
           headBoneRef.current = bone
         }
 
-        if (name === "mixamorigNeck" || name === "Neck" || name === "neck") {
+        if (name.startsWith("mixamorigNeck")) {
           neckBoneRef.current = bone
         }
 
-        // Prefer Spine1/Spine2 over root Spine for more natural lean
+        // Prefer Spine1 or Spine2 over root Spine for more natural lean
         if (
-          name === "mixamorigSpine1" ||
-          name === "mixamorigSpine2" ||
-          name === "Spine1" ||
-          name === "Spine2"
+          name.startsWith("mixamorigSpine1") ||
+          name.startsWith("mixamorigSpine2")
         ) {
           spineBoneRef.current = bone
         }
 
-        // Fallback for non-Mixamo rigs
-        if (!spineBoneRef.current && name.toLowerCase() === "spine") {
+        // Fallback to root Spine if Spine1/2 not found yet
+        if (!spineBoneRef.current && name.startsWith("mixamorigSpine")) {
           spineBoneRef.current = bone
         }
       }
@@ -135,15 +153,15 @@ function NovaModel() {
 
     console.log(
       "🦴 Head bone:",
-      (headBoneRef.current as THREE.Bone | null)?.name ?? "NOT FOUND",
+      (headBoneRef.current as THREE.Object3D | null)?.name ?? "NOT FOUND",
     )
     console.log(
       "🦴 Neck bone:",
-      (neckBoneRef.current as THREE.Bone | null)?.name ?? "NOT FOUND",
+      (neckBoneRef.current as THREE.Object3D | null)?.name ?? "NOT FOUND",
     )
     console.log(
       "🦴 Spine bone:",
-      (spineBoneRef.current as THREE.Bone | null)?.name ?? "NOT FOUND",
+      (spineBoneRef.current as THREE.Object3D | null)?.name ?? "NOT FOUND",
     )
     console.log("✨ Emissive materials:", materialsRef.current.length)
   }, [actions, names, scene])
@@ -154,9 +172,9 @@ function NovaModel() {
     const cursor = cursorRef.current
 
     // ── 1. Idle float ──────────────────────────────────────────────────────
-    // Gentle sine-wave hover — Nova never feels static
+    // Use position.set so X and Z never drift from their base values
     floatOffset.current += delta * 0.8
-    scene.position.y = Math.sin(floatOffset.current) * 0.04
+    scene.position.set(BASE_X, BASE_Y + Math.sin(floatOffset.current) * 0.04, 0)
 
     // ── 2. Head tracking toward cursor ────────────────────────────────────
     const maxYaw = 0.4 // left/right limit in radians (~23°)
@@ -244,7 +262,14 @@ function NovaModel() {
     }
   })
 
-  return <primitive object={scene} scale={1.5} />
+  return (
+    <primitive
+      object={scene}
+      scale={1.5}
+      position={[BASE_X, BASE_Y, 0]}
+      rotation={[0, 0, 0]}
+    />
+  )
 }
 
 // ─── Dynamic Lighting ─────────────────────────────────────────────────────────
@@ -296,7 +321,7 @@ export default function NovaScene() {
   return (
     <div className="w-full h-screen bg-transparent pointer-events-auto">
       <Canvas
-        camera={{ position: [0, 1.5, 4], fov: 40 }}
+        camera={{ position: [0, 1.0, 4.5], fov: 50 }}
         onCreated={({ gl }) => {
           // Suppress ANGLE shader precision warnings on Windows/Chrome
           const ctx = gl.getContext()
@@ -313,9 +338,10 @@ export default function NovaScene() {
         <Suspense fallback={null}>
           <NovaModel />
 
+          {/* Shadow follows Nova's base position */}
           <ContactShadows
-            position={[0, -1.35, 0]}
-            opacity={0.4}
+            position={[BASE_X, BASE_Y, 0]}
+            opacity={0.5}
             scale={10}
             blur={2}
             far={4}
@@ -324,13 +350,14 @@ export default function NovaScene() {
           <Environment preset="city" />
         </Suspense>
 
+        {/* Rotation disabled — head tracking gives interactivity instead.
+            Zoom with scroll still works. Nova always faces forward. */}
         <OrbitControls
           makeDefault
-          target={[0, 1, 0]}
+          target={[0, 0.8, 0]}
           enablePan={false}
-          minPolarAngle={Math.PI / 3}
-          maxPolarAngle={Math.PI / 2}
-          minDistance={2}
+          enableRotate={false}
+          minDistance={3}
           maxDistance={6}
         />
       </Canvas>
