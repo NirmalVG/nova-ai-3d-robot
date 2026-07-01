@@ -6,7 +6,7 @@ import { useNovaStore } from "@/store/useNovaStore"
 
 export default function DebugInput() {
   const [text, setText] = useState("")
-  const { askNova, testMicrophone } = useNovaBrain()
+  const { askNova, testVoice } = useNovaBrain()
   const { currentState } = useNovaStore()
 
   const handleSend = () => {
@@ -35,10 +35,10 @@ export default function DebugInput() {
         Send
       </button>
       <button
-        onClick={testMicrophone}
+        onClick={testVoice}
         className="text-yellow-400 text-xs uppercase tracking-widest hover:text-yellow-300 transition cursor-pointer"
       >
-        Test Mic
+        Test Voice
       </button>
     </div>
   )

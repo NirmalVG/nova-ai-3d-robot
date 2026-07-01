@@ -2,6 +2,7 @@
 
 import { useRef, useCallback, useEffect } from "react"
 import { useNovaStore } from "@/store/useNovaStore"
+import type { Emotion } from "@/lib/types"
 
 declare global {
   interface Window {
@@ -10,31 +11,94 @@ declare global {
   }
 }
 
+// ─── Emotion Parser ──────────────────────────────────────────────────────────
+// Extracts [EMOTION:xxx] tag from LLM response and returns clean text + emotion
+
+function parseEmotionTag(text: string): { cleanText: string; emotion: Emotion } {
+  const match = text.match(/\[EMOTION:(\w+)\]/i)
+  if (match) {
+    const emotion = match[1].toLowerCase() as Emotion
+    const validEmotions: Emotion[] = [
+      "neutral", "happy", "curious", "excited",
+      "sad", "bored", "surprised", "thoughtful",
+    ]
+    const cleanText = text.replace(/\[EMOTION:\w+\]/gi, "").trim()
+    return {
+      cleanText,
+      emotion: validEmotions.includes(emotion) ? emotion : "neutral",
+    }
+  }
+  return { cleanText: text, emotion: "neutral" }
+}
+
+// ─── User Facts Extractor ────────────────────────────────────────────────────
+// Simple heuristic extraction from user messages
+
+function extractUserFacts(
+  userText: string,
+  currentFacts: ReturnType<typeof useNovaStore.getState>["userFacts"],
+) {
+  const lower = userText.toLowerCase()
+  const updates: Partial<typeof currentFacts> = {}
+
+  // Extract name: "my name is X", "I'm X", "call me X"
+  const nameMatch = lower.match(
+    /(?:my name is|i'm|i am|call me|they call me)\s+([a-z]+)/i,
+  )
+  if (nameMatch && nameMatch[1].length > 1) {
+    const name = nameMatch[1].charAt(0).toUpperCase() + nameMatch[1].slice(1)
+    updates.name = name
+  }
+
+  // Extract likes: "I like X", "I love X", "I enjoy X"
+  const likeMatch = lower.match(
+    /(?:i like|i love|i enjoy|i'm into|i am into|fan of)\s+(.+?)(?:\.|,|!|$)/i,
+  )
+  if (likeMatch) {
+    const like = likeMatch[1].trim()
+    if (like.length > 1 && like.length < 50) {
+      const currentLikes = currentFacts.likes || []
+      if (!currentLikes.includes(like)) {
+        updates.likes = [...currentLikes, like].slice(-10)
+      }
+    }
+  }
+
+  // Track first interaction
+  if (!currentFacts.firstInteraction) {
+    updates.firstInteraction = new Date().toISOString()
+  }
+
+  // Increment conversation count
+  updates.totalConversations = (currentFacts.totalConversations || 0) + 1
+
+  return Object.keys(updates).length > 0 ? updates : null
+}
+
 export function useNovaBrain() {
   const {
     setCurrentState,
     setCurrentProvider,
     setTranscripts,
+    setEmotionalState,
+    setUserFacts,
     personality,
     conversationHistory,
+    voiceSettings,
+    userFacts,
     addToHistory,
   } = useNovaStore()
 
   const recognitionRef = useRef<any>(null)
   const voicesRef = useRef<SpeechSynthesisVoice[]>([])
+  const utteranceRef = useRef<SpeechSynthesisUtterance | null>(null)
 
   // ─── Pre-load Voices ──────────────────────────────────────────────────────
-  // getVoices() returns [] on first call in Chrome because the voice list
-  // loads asynchronously. We cache them as soon as they're available.
   useEffect(() => {
     const loadVoices = () => {
       const voices = window.speechSynthesis.getVoices()
       if (voices.length > 0) {
         voicesRef.current = voices
-        console.log(
-          "🎙️ Voices loaded:",
-          voices.map((v) => v.name),
-        )
       }
     }
 
@@ -46,48 +110,59 @@ export function useNovaBrain() {
     }
   }, [])
 
+  // ─── Stop Speaking ────────────────────────────────────────────────────────
+  const stopSpeaking = useCallback(() => {
+    window.speechSynthesis.cancel()
+    utteranceRef.current = null
+    setCurrentState("IDLE")
+  }, [setCurrentState])
+
   // ─── TTS ──────────────────────────────────────────────────────────────────
   const speakResponse = useCallback(
-    (text: string, userText: string) => {
+    (text: string, userText: string, emotion?: Emotion) => {
       setCurrentState("SPEAKING")
       setTranscripts(userText, text)
+      if (emotion) setEmotionalState(emotion)
 
       window.speechSynthesis.cancel()
 
       const utterance = new SpeechSynthesisUtterance(text)
+      utteranceRef.current = utterance
 
+      // Apply voice settings from store
+      const currentSettings = useNovaStore.getState().voiceSettings
       const voices = voicesRef.current
-      const preferredVoice =
-        voices.find((v) => v.name.includes("Google US English")) ||
-        voices.find((v) => v.name.includes("Samantha")) ||
-        voices.find((v) => v.name.includes("Microsoft Zira")) ||
-        voices.find((v) => v.lang === "en-US" && !v.localService) ||
-        voices.find((v) => v.lang === "en-US") ||
-        voices[0] ||
-        null
 
-      if (preferredVoice) {
-        utterance.voice = preferredVoice
-        console.log("🔊 Speaking with voice:", preferredVoice.name)
-      } else {
-        console.warn("⚠️ No voices available yet — using browser default")
+      // Find voice by URI or fallback
+      let selectedVoice: SpeechSynthesisVoice | null = null
+      if (currentSettings.voiceURI) {
+        selectedVoice = voices.find((v) => v.voiceURI === currentSettings.voiceURI) || null
+      }
+      if (!selectedVoice) {
+        selectedVoice =
+          voices.find((v) => v.name.includes("Google US English")) ||
+          voices.find((v) => v.name.includes("Samantha")) ||
+          voices.find((v) => v.name.includes("Microsoft Zira")) ||
+          voices.find((v) => v.lang === "en-US" && !v.localService) ||
+          voices.find((v) => v.lang === "en-US") ||
+          voices[0] ||
+          null
       }
 
-      utterance.pitch = 1.1
-      utterance.rate = 1.05
-      utterance.volume = 1.0
-
-      utterance.onstart = () => {
-        console.log("🔊 TTS started")
+      if (selectedVoice) {
+        utterance.voice = selectedVoice
       }
+
+      utterance.pitch = currentSettings.pitch
+      utterance.rate = currentSettings.rate
+      utterance.volume = currentSettings.volume
 
       utterance.onend = () => {
-        console.log("✅ TTS finished")
+        utteranceRef.current = null
         setCurrentState("IDLE")
       }
 
-      // Chrome TTS bug — long utterances stop mid-sentence.
-      // Poking speechSynthesis every 5s keeps it alive.
+      // Chrome TTS bug workaround
       const keepAlive = setInterval(() => {
         if (window.speechSynthesis.speaking) {
           window.speechSynthesis.pause()
@@ -100,12 +175,13 @@ export function useNovaBrain() {
       utterance.onerror = (e) => {
         console.error("❌ TTS error:", e.error)
         clearInterval(keepAlive)
+        utteranceRef.current = null
         setCurrentState("IDLE")
       }
 
       window.speechSynthesis.speak(utterance)
     },
-    [setCurrentState, setTranscripts],
+    [setCurrentState, setTranscripts, setEmotionalState],
   )
 
   // ─── AI Call ──────────────────────────────────────────────────────────────
@@ -114,8 +190,15 @@ export function useNovaBrain() {
       setCurrentState("THINKING")
       setTranscripts(userText, "...")
 
-      const userMessage = { role: "user" as const, content: userText }
+      const userMessage = { role: "user" as const, content: userText, timestamp: Date.now() }
       addToHistory(userMessage)
+
+      // Extract user facts from their message
+      const currentFacts = useNovaStore.getState().userFacts
+      const factUpdates = extractUserFacts(userText, currentFacts)
+      if (factUpdates) {
+        setUserFacts(factUpdates)
+      }
 
       try {
         const res = await fetch("/api/chat", {
@@ -128,25 +211,26 @@ export function useNovaBrain() {
               formality: personality.formality,
               empathy: personality.empathy,
             },
+            userFacts: { ...currentFacts, ...factUpdates },
           }),
         })
 
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
 
         const { text, provider } = await res.json()
-        console.log(`🤖 Nova replied via ${provider}:`, text)
-
-        // Update HUD provider badge
         setCurrentProvider(provider)
 
-        addToHistory({ role: "assistant", content: text })
-        speakResponse(text, userText)
+        // Parse emotion tag from response
+        const { cleanText, emotion } = parseEmotionTag(text)
+
+        addToHistory({ role: "assistant", content: cleanText, timestamp: Date.now(), emotion })
+        speakResponse(cleanText, userText, emotion)
       } catch (err) {
         console.error("💥 Nova brain error:", err)
-        // Always recover to SPEAKING so THINKING never gets permanently stuck
         speakResponse(
           "My neural link encountered an error. Please try again.",
           userText,
+          "sad",
         )
       }
     },
@@ -154,51 +238,13 @@ export function useNovaBrain() {
       setCurrentState,
       setCurrentProvider,
       setTranscripts,
+      setUserFacts,
       personality,
       conversationHistory,
       addToHistory,
       speakResponse,
     ],
   )
-
-  // ─── Mic Diagnostic ───────────────────────────────────────────────────────
-  // Reads raw audio levels for 3 seconds to confirm the browser is
-  // actually receiving audio from the microphone.
-  const testMicrophone = useCallback(async () => {
-    console.log("🎚️ Starting mic test — speak now...")
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const audioContext = new AudioContext()
-      const analyser = audioContext.createAnalyser()
-      const source = audioContext.createMediaStreamSource(stream)
-      source.connect(analyser)
-
-      const dataArray = new Uint8Array(analyser.frequencyBinCount)
-      let maxVolume = 0
-
-      const check = setInterval(() => {
-        analyser.getByteFrequencyData(dataArray)
-        const volume = Math.max(...dataArray)
-        maxVolume = Math.max(maxVolume, volume)
-        console.log(`🎚️ Mic level: ${volume} (peak: ${maxVolume})`)
-      }, 200)
-
-      setTimeout(() => {
-        clearInterval(check)
-        stream.getTracks().forEach((t) => t.stop())
-        audioContext.close()
-        if (maxVolume < 10) {
-          console.warn(
-            "⚠️ Mic peak was very low — check your microphone in Windows Sound Settings",
-          )
-        } else {
-          console.log(`✅ Mic is working correctly — peak volume: ${maxVolume}`)
-        }
-      }, 3000)
-    } catch (err) {
-      console.error("❌ Mic access failed:", err)
-    }
-  }, [])
 
   // ─── Speech Recognition ───────────────────────────────────────────────────
   const startListening = useCallback(() => {
@@ -208,6 +254,11 @@ export function useNovaBrain() {
     if (!SpeechRecognition) {
       alert("Voice not supported. Use Chrome or Edge.")
       return
+    }
+
+    // If currently speaking, stop first
+    if (useNovaStore.getState().currentState === "SPEAKING") {
+      stopSpeaking()
     }
 
     if (recognitionRef.current) {
@@ -221,17 +272,12 @@ export function useNovaBrain() {
     recognition.lang = "en-US"
     recognition.continuous = false
     recognition.maxAlternatives = 1
-
-    // interimResults: true streams partial results as you speak.
-    // This gives us a fallback if the final result never fires
-    // (common when Google STT has network hiccups).
     recognition.interimResults = true
 
     let lastInterimTranscript = ""
     let finalResultFired = false
 
     recognition.onstart = () => {
-      console.log("🎤 Listening started")
       lastInterimTranscript = ""
       finalResultFired = false
       setCurrentState("LISTENING")
@@ -252,40 +298,28 @@ export function useNovaBrain() {
 
       if (interimTranscript) {
         lastInterimTranscript = interimTranscript
-        console.log(`🎤 Interim: "${interimTranscript}"`)
+        // Show interim text in subtitles for feedback
+        setTranscripts(interimTranscript, "")
       }
 
       if (finalTranscript) {
         finalResultFired = true
-        const confidence = event.results[event.results.length - 1][0].confidence
-        console.log(
-          `🎤 Final: "${finalTranscript}" (confidence: ${confidence.toFixed(2)})`,
-        )
         askNova(finalTranscript.trim())
       }
     }
 
-    // onspeechend fires BEFORE onresult — do not stop recognition here
-    // or the result gets killed before it can return
     recognition.onspeechend = () => {
-      console.log("🎤 Speech ended, waiting for final result...")
+      // Wait for final result, don't stop recognition here
     }
 
     recognition.onend = () => {
-      console.log("🎤 Recognition ended. Final fired:", finalResultFired)
       recognitionRef.current = null
 
-      // If onresult final never fired but we captured interim text,
-      // use that — better than dropping the utterance entirely
       if (!finalResultFired && lastInterimTranscript.trim()) {
-        console.log(
-          `🎤 Using interim fallback: "${lastInterimTranscript.trim()}"`,
-        )
         askNova(lastInterimTranscript.trim())
         return
       }
 
-      // Nothing captured at all — reset to idle
       if (!finalResultFired) {
         if (useNovaStore.getState().currentState === "LISTENING") {
           setCurrentState("IDLE")
@@ -296,9 +330,7 @@ export function useNovaBrain() {
     recognition.onerror = (event: any) => {
       recognitionRef.current = null
 
-      // no-speech means user was silent — not a real error
       if (event.error === "no-speech") {
-        console.log("🎤 No speech detected — timed out")
         setCurrentState("IDLE")
         return
       }
@@ -309,14 +341,8 @@ export function useNovaBrain() {
         return
       }
 
-      // network error means Google STT servers unreachable —
-      // use interim fallback if we captured anything
       if (event.error === "network") {
-        console.warn("🎤 Network error — Google STT unreachable")
         if (lastInterimTranscript.trim()) {
-          console.log(
-            `🎤 Using interim fallback: "${lastInterimTranscript.trim()}"`,
-          )
           askNova(lastInterimTranscript.trim())
         } else {
           setCurrentState("IDLE")
@@ -329,7 +355,30 @@ export function useNovaBrain() {
     }
 
     recognition.start()
-  }, [setCurrentState, askNova])
+  }, [setCurrentState, setTranscripts, askNova, stopSpeaking])
 
-  return { startListening, askNova, testMicrophone }
+  // ─── Get Available Voices ─────────────────────────────────────────────────
+  const getVoices = useCallback(() => {
+    return voicesRef.current
+  }, [])
+
+  // ─── Test Voice ───────────────────────────────────────────────────────────
+  const testVoice = useCallback(() => {
+    const settings = useNovaStore.getState().voiceSettings
+    const utterance = new SpeechSynthesisUtterance(
+      "Hello! I am Nova, your AI companion. How do I sound?",
+    )
+    const voices = voicesRef.current
+    if (settings.voiceURI) {
+      const voice = voices.find((v) => v.voiceURI === settings.voiceURI)
+      if (voice) utterance.voice = voice
+    }
+    utterance.pitch = settings.pitch
+    utterance.rate = settings.rate
+    utterance.volume = settings.volume
+    window.speechSynthesis.cancel()
+    window.speechSynthesis.speak(utterance)
+  }, [])
+
+  return { startListening, askNova, stopSpeaking, getVoices, testVoice }
 }

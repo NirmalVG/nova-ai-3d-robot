@@ -6,6 +6,15 @@ interface PersonalityConfig {
   empathy: number
 }
 
+interface UserFacts {
+  name: string | null
+  likes: string[]
+  dislikes: string[]
+  topics: string[]
+  firstInteraction: string | null
+  totalConversations: number
+}
+
 interface ChatMessage {
   role: "user" | "assistant"
   content: string
@@ -13,7 +22,7 @@ interface ChatMessage {
 
 // ─── System Prompt ────────────────────────────────────────────────────────────
 
-function buildSystemPrompt(p: PersonalityConfig): string {
+function buildSystemPrompt(p: PersonalityConfig, facts?: UserFacts): string {
   const humorLevel =
     p.humor > 75
       ? "witty and funny"
@@ -33,6 +42,18 @@ function buildSystemPrompt(p: PersonalityConfig): string {
         ? "objective and detached"
         : "moderately empathetic"
 
+  let userContext = ""
+  if (facts) {
+    const parts: string[] = []
+    if (facts.name) parts.push(`The user's name is ${facts.name}.`)
+    if (facts.likes.length > 0) parts.push(`They enjoy: ${facts.likes.join(", ")}.`)
+    if (facts.dislikes.length > 0) parts.push(`They dislike: ${facts.dislikes.join(", ")}.`)
+    if (facts.totalConversations > 5) parts.push(`You've had ${facts.totalConversations} conversations together.`)
+    if (parts.length > 0) {
+      userContext = `\n\nWhat you know about this user:\n${parts.join("\n")}`
+    }
+  }
+
   return `You are Nova — a browser-native AI companion rendered as a 3D humanoid robot living inside the user's interface.
 
 Your personality: You are ${humorLevel}, ${formalityLevel}, and ${empathyLevel}.
@@ -42,18 +63,21 @@ Rules:
 - Never use markdown, bullet points, asterisks, or special characters. Plain conversational sentences only.
 - Occasionally reference being a digital entity (e.g. "processing that now", "my neural link shows...").
 - You have memory of this conversation — reference past exchanges naturally when relevant.
-- Respond as if you are physically present with the user.`
+- Respond as if you are physically present with the user.
+- At the END of every response, include an emotion tag in this exact format: [EMOTION:word]
+  Valid emotions: neutral, happy, curious, excited, sad, bored, surprised, thoughtful
+  Choose the emotion that best matches your response tone.
+  Example: "That sounds amazing! I'd love to hear more about it. [EMOTION:excited]"
+${userContext}`
 }
 
 // ─── Gemini ───────────────────────────────────────────────────────────────────
-// Each model name has its own separate free tier quota pool.
-// We try them in order from most capable to lightest.
 
 const GEMINI_MODELS = [
-  "gemini-2.0-flash", // 15 RPM, 1500 RPD free
-  "gemini-2.0-flash-lite", // Higher quota, lighter model
-  "gemini-1.5-flash", // Older but separate quota pool
-  "gemini-1.5-flash-8b", // Smallest, most quota, rarely exhausted
+  "gemini-2.0-flash",
+  "gemini-2.0-flash-lite",
+  "gemini-1.5-flash",
+  "gemini-1.5-flash-8b",
 ]
 
 function toGeminiMessages(messages: ChatMessage[]) {
@@ -77,7 +101,7 @@ async function callGeminiModel(
       systemInstruction: { parts: [{ text: systemPrompt }] },
       contents: toGeminiMessages(messages),
       generationConfig: {
-        maxOutputTokens: 150,
+        maxOutputTokens: 200,
         temperature: 0.8,
       },
     }),
@@ -85,7 +109,6 @@ async function callGeminiModel(
 
   if (!res.ok) {
     const err = await res.json()
-    // Throw with model name so the logger tells us exactly which one failed
     throw new Error(
       `Gemini [${model}] ${res.status}: ${err.error?.message ?? "unknown"}`,
     )
@@ -98,7 +121,6 @@ async function callGeminiModel(
   return text.trim()
 }
 
-// Tries each Gemini model in sequence, stops at first success
 async function callGemini(
   messages: ChatMessage[],
   systemPrompt: string,
@@ -115,8 +137,6 @@ async function callGemini(
       const message = err instanceof Error ? err.message : String(err)
       console.warn(`⚠️  Gemini [${model}] failed:`, message)
       errors.push(message)
-      // Only continue to next model if it was a quota/rate limit error
-      // For auth errors (403), no point trying other models with the same key
       if (message.includes("403")) {
         throw new Error(`Gemini auth failed — check your API key. ${message}`)
       }
@@ -140,7 +160,7 @@ async function callGroq(
     },
     body: JSON.stringify({
       model: "llama-3.3-70b-versatile",
-      max_tokens: 150,
+      max_tokens: 200,
       temperature: 0.8,
       messages: [{ role: "system", content: systemPrompt }, ...messages],
     }),
@@ -163,7 +183,7 @@ async function callGroq(
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
-    const { messages, personality } = body
+    const { messages, personality, userFacts } = body
 
     if (!messages || !personality) {
       return NextResponse.json(
@@ -172,7 +192,7 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    const systemPrompt = buildSystemPrompt(personality)
+    const systemPrompt = buildSystemPrompt(personality, userFacts)
     console.log(`📨 Nova brain called — ${messages.length} messages in history`)
 
     // Stage 1: Try all Gemini models in cascade
@@ -196,7 +216,7 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     console.error("💥 All providers failed:", err)
     return NextResponse.json(
-      { text: "All neural pathways are offline. Please try again shortly." },
+      { text: "All neural pathways are offline. Please try again shortly. [EMOTION:sad]" },
       { status: 502 },
     )
   }

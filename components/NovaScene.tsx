@@ -1,6 +1,6 @@
 "use client"
 
-import { Canvas, useFrame } from "@react-three/fiber"
+import { Canvas, useFrame, useThree } from "@react-three/fiber"
 import {
   OrbitControls,
   Environment,
@@ -8,11 +8,24 @@ import {
   useGLTF,
   useAnimations,
 } from "@react-three/drei"
-import { useEffect, useRef, Suspense } from "react"
+import { EffectComposer, Bloom, Vignette } from "@react-three/postprocessing"
+import { useEffect, useRef, useMemo, Suspense, useCallback } from "react"
 import * as THREE from "three"
 import { useNovaStore } from "@/store/useNovaStore"
+import type { Emotion, EnvironmentPreset } from "@/lib/types"
 
 // ─── Constants ────────────────────────────────────────────────────────────────
+
+const EMOTION_COLORS: Record<Emotion, THREE.Color> = {
+  neutral: new THREE.Color(0x06b6d4),
+  happy: new THREE.Color(0x22d3ee),
+  curious: new THREE.Color(0xa855f7),
+  excited: new THREE.Color(0xfbbf24),
+  sad: new THREE.Color(0x6366f1),
+  bored: new THREE.Color(0x64748b),
+  surprised: new THREE.Color(0xf97316),
+  thoughtful: new THREE.Color(0x8b5cf6),
+}
 
 const STATE_COLORS: Record<string, THREE.Color> = {
   IDLE: new THREE.Color(0x06b6d4),
@@ -21,9 +34,7 @@ const STATE_COLORS: Record<string, THREE.Color> = {
   SPEAKING: new THREE.Color(0x67e8f9),
 }
 
-// World x=0 = screen center = behind mic button.
 const BASE_Y = -1.0
-const MODEL_SCALE = 1.5
 const CAMERA_TARGET_Y = BASE_Y + 0.9
 
 const BONES_TO_FREE = [
@@ -45,170 +56,247 @@ function useCursorTarget() {
         -((e.clientY / window.innerHeight) * 2 - 1),
       )
     }
+    const handleTouchMove = (e: TouchEvent) => {
+      if (e.touches.length > 0) {
+        const t = e.touches[0]
+        cursorRef.current.set(
+          (t.clientX / window.innerWidth) * 2 - 1,
+          -((t.clientY / window.innerHeight) * 2 - 1),
+        )
+      }
+    }
     window.addEventListener("mousemove", handleMouseMove)
-    return () => window.removeEventListener("mousemove", handleMouseMove)
+    window.addEventListener("touchmove", handleTouchMove, { passive: true })
+    return () => {
+      window.removeEventListener("mousemove", handleMouseMove)
+      window.removeEventListener("touchmove", handleTouchMove)
+    }
   }, [])
 
   return cursorRef
 }
 
+// ─── Material Color Applier ──────────────────────────────────────────────────
+
+function useApplyMaterialColor(scene: THREE.Object3D) {
+  const lastColorRef = useRef<string>("")
+
+  useFrame(() => {
+    const colorPreset = useNovaStore.getState().materialColor
+    if (colorPreset === lastColorRef.current) return
+    lastColorRef.current = colorPreset
+
+    const colorMap: Record<string, string> = {
+      chrome: "#C0C0C0",
+      white: "#F0F0F0",
+      obsidian: "#1a1a2e",
+      gold: "#FFD700",
+      cyan: "#06b6d4",
+      crimson: "#DC143C",
+    }
+
+    const hex = colorMap[colorPreset] || "#C0C0C0"
+    const tintColor = new THREE.Color(hex)
+
+    scene.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        const mesh = child as THREE.Mesh
+        const mat = mesh.material
+        if (mat && "color" in mat) {
+          const m = mat as THREE.MeshStandardMaterial
+          // Blend: keep original brightness, shift hue
+          m.color.lerp(tintColor, 0.3)
+          m.needsUpdate = true
+        }
+      }
+    })
+  })
+}
+
 // ─── Nova Model ───────────────────────────────────────────────────────────────
 
 function NovaModel() {
- const { scene, animations } = useGLTF("/nova.glb")
- const { actions, names, mixer } = useAnimations(animations, scene)
- const cursorRef = useCursorTarget()
+  const { scene, animations } = useGLTF("/nova.glb")
+  const { actions, names, mixer } = useAnimations(animations, scene)
+  const cursorRef = useCursorTarget()
 
- const headBoneRef = useRef<THREE.Object3D | null>(null)
- const spineBoneRef = useRef<THREE.Object3D | null>(null)
- const neckBoneRef = useRef<THREE.Object3D | null>(null)
+  const headBoneRef = useRef<THREE.Object3D | null>(null)
+  const spineBoneRef = useRef<THREE.Object3D | null>(null)
+  const neckBoneRef = useRef<THREE.Object3D | null>(null)
 
- const smoothHeadRot = useRef(new THREE.Euler(0, 0, 0))
- const smoothLean = useRef(0)
- const floatOffset = useRef(0)
+  const smoothHeadRot = useRef(new THREE.Euler(0, 0, 0))
+  const smoothLean = useRef(0)
+  const floatOffset = useRef(0)
 
- const groupRef = useRef<THREE.Group | null>(null)
- const baseYOffset = useRef(0) // stores base Y position for floating
+  const groupRef = useRef<THREE.Group | null>(null)
+  const baseYOffset = useRef(0)
 
- useEffect(() => {
-   headBoneRef.current = null
-   neckBoneRef.current = null
-   spineBoneRef.current = null
+  // Apply material color tinting
+  useApplyMaterialColor(scene)
 
-   // ── Play idle animation ────────────────────────────────────────────────
-   if (names.length > 0) {
-     const idleName = names.find(n => n.toLowerCase().includes("idle")) || names[0]
-     actions[idleName]?.reset().fadeIn(0.5).play()
-   }
+  useEffect(() => {
+    headBoneRef.current = null
+    neckBoneRef.current = null
+    spineBoneRef.current = null
 
-   // ── Free head/neck/spine from animation keyframes ─────────────────────
-   function freeHeadTracks() {
-     animations.forEach((clip) => {
-       clip.tracks.forEach((track) => {
-         const boneName = track.name.split(".")[0]
-         const shouldFree = BONES_TO_FREE.some((b) => boneName.startsWith(b))
-         if (shouldFree && track.name.includes("quaternion")) {
-           const qt = track as THREE.QuaternionKeyframeTrack
-           for (let i = 0; i < qt.values.length; i += 4) {
-             qt.values[i] = 0
-             qt.values[i + 1] = 0
-             qt.values[i + 2] = 0
-             qt.values[i + 3] = 1
-           }
-         }
-       })
-     })
-   }
+    // Play idle animation
+    if (names.length > 0) {
+      const idleName = names.find((n) => n.toLowerCase().includes("idle")) || names[0]
+      actions[idleName]?.reset().fadeIn(0.5).play()
+    }
 
-   freeHeadTracks()
-   mixer?.addEventListener("loop", freeHeadTracks)
+    // Free head/neck/spine from animation keyframes
+    function freeHeadTracks() {
+      animations.forEach((clip) => {
+        clip.tracks.forEach((track) => {
+          const boneName = track.name.split(".")[0]
+          const shouldFree = BONES_TO_FREE.some((b) => boneName.startsWith(b))
+          if (shouldFree && track.name.includes("quaternion")) {
+            const qt = track as THREE.QuaternionKeyframeTrack
+            for (let i = 0; i < qt.values.length; i += 4) {
+              qt.values[i] = 0
+              qt.values[i + 1] = 0
+              qt.values[i + 2] = 0
+              qt.values[i + 3] = 1
+            }
+          }
+        })
+      })
+    }
 
-   // ── Find bones ─────────────────────────────────────────────────────────
-   scene.traverse((obj) => {
-     if ((obj as THREE.Bone).isBone) {
-       const bone = obj as THREE.Object3D
-       const name = bone.name
+    freeHeadTracks()
+    mixer?.addEventListener("loop", freeHeadTracks)
 
-       if (name.startsWith("mixamorigHead") && !name.startsWith("mixamorigHeadTop")) {
-         headBoneRef.current = bone
-       }
-       if (name.startsWith("mixamorigNeck")) {
-         neckBoneRef.current = bone
-       }
-       if (name.startsWith("mixamorigSpine1") || name.startsWith("mixamorigSpine2")) {
-         spineBoneRef.current = bone
-       }
-       if (!spineBoneRef.current && name.startsWith("mixamorigSpine")) {
-         spineBoneRef.current = bone
-       }
-     }
-   })
+    // Find bones
+    scene.traverse((obj) => {
+      if ((obj as THREE.Bone).isBone) {
+        const bone = obj as THREE.Object3D
+        const name = bone.name
 
-  // Compute true model bounds and place model so:
-  // - it is centered on world X/Z
-  // - its feet sit on BASE_Y
-  const box = new THREE.Box3().setFromObject(scene)
-  const center = box.getCenter(new THREE.Vector3())
-  const xOffset = -center.x * MODEL_SCALE
-  const zOffset = -center.z * MODEL_SCALE
-  baseYOffset.current = BASE_Y - box.min.y * MODEL_SCALE
+        if (name.startsWith("mixamorigHead") && !name.startsWith("mixamorigHeadTop")) {
+          headBoneRef.current = bone
+        }
+        if (name.startsWith("mixamorigNeck")) {
+          neckBoneRef.current = bone
+        }
+        if (name.startsWith("mixamorigSpine1") || name.startsWith("mixamorigSpine2")) {
+          spineBoneRef.current = bone
+        }
+        if (!spineBoneRef.current && name.startsWith("mixamorigSpine")) {
+          spineBoneRef.current = bone
+        }
+      }
+    })
 
-   if (groupRef.current) {
-    groupRef.current.position.set(xOffset, baseYOffset.current, zOffset)
-  }
+    // Position model
+    const box = new THREE.Box3().setFromObject(scene)
+    const center = box.getCenter(new THREE.Vector3())
+    const scale = useNovaStore.getState().robotScale
+    const xOffset = -center.x * scale
+    const zOffset = -center.z * scale
+    baseYOffset.current = BASE_Y - box.min.y * scale
 
-   return () => {
-     mixer?.removeEventListener("loop", freeHeadTracks)
-   }
- }, [actions, names, scene, animations, mixer])
+    if (groupRef.current) {
+      groupRef.current.position.set(xOffset, baseYOffset.current, zOffset)
+    }
 
- // ── Per-frame loop ─────────────────────────────────────────────────────────
- useFrame((_, delta) => {
-   const state = useNovaStore.getState().currentState
-   const cursor = cursorRef.current
+    // Signal loading complete
+    useNovaStore.getState().setIsLoaded(true)
 
-   // ── 1. Float ───────────────────────────────────────────────────────────
-   floatOffset.current += delta * 0.8
-   if (groupRef.current) {
-     groupRef.current.position.y = baseYOffset.current + Math.sin(floatOffset.current) * 0.04
-   }
+    return () => {
+      mixer?.removeEventListener("loop", freeHeadTracks)
+    }
+  }, [actions, names, scene, animations, mixer])
 
-   // ── 2. Head tracking ──────────────────────────────────────────────────
-   const targetYaw = cursor.x * 0.3
-   const targetPitch = cursor.y * 0.2
-     const lerpSpeed = state === "LISTENING" ? 6 : 3
+  // Per-frame loop
+  useFrame((_, delta) => {
+    const state = useNovaStore.getState().currentState
+    const emotion = useNovaStore.getState().emotionalState
+    const scale = useNovaStore.getState().robotScale
+    const cursor = cursorRef.current
 
-   smoothHeadRot.current.y = THREE.MathUtils.lerp(
-     smoothHeadRot.current.y,
-     targetYaw,
-     delta * lerpSpeed,
-   )
-   smoothHeadRot.current.x = THREE.MathUtils.lerp(
-     smoothHeadRot.current.x,
-     -targetPitch,
-     delta * lerpSpeed,
-   )
+    // Update scale
+    if (groupRef.current) {
+      const children = groupRef.current.children
+      if (children.length > 0) {
+        children[0].scale.setScalar(scale)
+      }
+    }
 
-   if (headBoneRef.current) {
-     headBoneRef.current.rotation.y = smoothHeadRot.current.y * 0.6
-     headBoneRef.current.rotation.x = smoothHeadRot.current.x * 0.6
-   }
-   if (neckBoneRef.current) {
-     neckBoneRef.current.rotation.y = smoothHeadRot.current.y * 0.4
-     neckBoneRef.current.rotation.x = smoothHeadRot.current.x * 0.4
-   }
+    // 1. Float with emotion influence
+    const floatSpeed = emotion === "excited" ? 1.4 : emotion === "bored" ? 0.4 : 0.8
+    const floatAmplitude = emotion === "excited" ? 0.07 : emotion === "sad" ? 0.02 : 0.04
+    floatOffset.current += delta * floatSpeed
+    if (groupRef.current) {
+      groupRef.current.position.y =
+        baseYOffset.current + Math.sin(floatOffset.current) * floatAmplitude
+    }
 
-   // ── 3. Body lean ──────────────────────────────────────────────────────
-   const targetLean =
-     state === "LISTENING" ? 0.06 : state === "THINKING" ? -0.04 : 0
+    // 2. Head tracking
+    const targetYaw = cursor.x * 0.3
+    const targetPitch = cursor.y * 0.2
+    const lerpSpeed = state === "LISTENING" ? 6 : 3
 
-   smoothLean.current = THREE.MathUtils.lerp(
-     smoothLean.current,
-     targetLean,
-     delta * 3,
-   )
+    smoothHeadRot.current.y = THREE.MathUtils.lerp(
+      smoothHeadRot.current.y,
+      targetYaw,
+      delta * lerpSpeed,
+    )
+    smoothHeadRot.current.x = THREE.MathUtils.lerp(
+      smoothHeadRot.current.x,
+      -targetPitch,
+      delta * lerpSpeed,
+    )
 
-   if (spineBoneRef.current) {
-     spineBoneRef.current.rotation.x = smoothLean.current
-   }
+    if (headBoneRef.current) {
+      headBoneRef.current.rotation.y = smoothHeadRot.current.y * 0.6
+      headBoneRef.current.rotation.x = smoothHeadRot.current.x * 0.6
+    }
+    if (neckBoneRef.current) {
+      neckBoneRef.current.rotation.y = smoothHeadRot.current.y * 0.4
+      neckBoneRef.current.rotation.x = smoothHeadRot.current.x * 0.4
+    }
 
-   // ── 4. Speaking sway ──────────────────────────────────────────────────
-   if (spineBoneRef.current) {
-     const targetSway =
-       state === "SPEAKING" ? Math.sin(floatOffset.current * 2.5) * 0.02 : 0
+    // 3. Body lean
+    const targetLean =
+      state === "LISTENING"
+        ? 0.06
+        : state === "THINKING"
+          ? -0.04
+          : emotion === "curious"
+            ? 0.03
+            : 0
 
-     spineBoneRef.current.rotation.z = THREE.MathUtils.lerp(
-       spineBoneRef.current.rotation.z,
-       targetSway,
-       delta * 3,
-     )
-   }
- })
+    smoothLean.current = THREE.MathUtils.lerp(
+      smoothLean.current,
+      targetLean,
+      delta * 3,
+    )
 
- // ── Render ─────────────────────────────────────────────────────────────────
+    if (spineBoneRef.current) {
+      spineBoneRef.current.rotation.x = smoothLean.current
+    }
+
+    // 4. Speaking sway / emotion body language
+    if (spineBoneRef.current) {
+      let targetSway = 0
+      if (state === "SPEAKING") {
+        targetSway = Math.sin(floatOffset.current * 2.5) * 0.02
+      } else if (emotion === "happy" || emotion === "excited") {
+        targetSway = Math.sin(floatOffset.current * 1.5) * 0.01
+      }
+
+      spineBoneRef.current.rotation.z = THREE.MathUtils.lerp(
+        spineBoneRef.current.rotation.z,
+        targetSway,
+        delta * 3,
+      )
+    }
+  })
+
   return (
     <group ref={groupRef} position={[0, BASE_Y, 0]}>
-      <primitive object={scene} scale={MODEL_SCALE} />
+      <primitive object={scene} scale={useNovaStore.getState().robotScale} />
     </group>
   )
 }
@@ -221,10 +309,15 @@ function DynamicLighting() {
 
   useFrame((_, delta) => {
     const state = useNovaStore.getState().currentState
-    const targetColor = STATE_COLORS[state] ?? STATE_COLORS.IDLE
+    const emotion = useNovaStore.getState().emotionalState
 
-    keyRef.current?.color.lerp(targetColor, delta * 2)
-    rimRef.current?.color.lerp(targetColor, delta * 2)
+    // Blend state color with emotion color
+    const stateColor = STATE_COLORS[state] ?? STATE_COLORS.IDLE
+    const emotionColor = EMOTION_COLORS[emotion] ?? EMOTION_COLORS.neutral
+    const blendedColor = stateColor.clone().lerp(emotionColor, 0.3)
+
+    keyRef.current?.color.lerp(blendedColor, delta * 2)
+    rimRef.current?.color.lerp(emotionColor, delta * 2)
 
     if (keyRef.current) {
       const targetIntensity =
@@ -234,7 +327,9 @@ function DynamicLighting() {
             ? 2.5
             : state === "SPEAKING"
               ? 2.5
-              : 2.0
+              : emotion === "excited"
+                ? 2.5
+                : 2.0
 
       keyRef.current.intensity = THREE.MathUtils.lerp(
         keyRef.current.intensity,
@@ -247,8 +342,6 @@ function DynamicLighting() {
   return (
     <>
       <ambientLight intensity={0.5} />
-
-      {/* Key light */}
       <spotLight
         ref={keyRef}
         position={[4, 6, 5]}
@@ -258,8 +351,6 @@ function DynamicLighting() {
         color="#06b6d4"
         castShadow={false}
       />
-
-      {/* Fill light */}
       <spotLight
         position={[-4, 4, -4]}
         angle={0.2}
@@ -267,8 +358,6 @@ function DynamicLighting() {
         intensity={0.8}
         color="#ffffff"
       />
-
-      {/* Rim light */}
       <pointLight
         ref={rimRef}
         position={[0, -0.5, 2]}
@@ -279,6 +368,91 @@ function DynamicLighting() {
   )
 }
 
+// ─── Sci-Fi Ground Grid ───────────────────────────────────────────────────────
+
+function GroundGrid() {
+  const gridRef = useRef<THREE.GridHelper>(null)
+
+  useFrame((_, delta) => {
+    if (gridRef.current) {
+      gridRef.current.position.z = ((gridRef.current.position.z + delta * 0.1) % 0.5)
+    }
+  })
+
+  return (
+    <gridHelper
+      ref={gridRef}
+      args={[20, 40, "#06b6d420", "#06b6d410"]}
+      position={[0, BASE_Y - 0.01, 0]}
+    />
+  )
+}
+
+// ─── Environment Wrapper ─────────────────────────────────────────────────────
+
+function SceneEnvironment() {
+  const environment = useNovaStore((s) => s.environment)
+
+  // Map our preset names to drei Environment presets
+  const presetMap: Record<string, string> = {
+    city: "city",
+    sunset: "sunset",
+    dawn: "dawn",
+    night: "night",
+    warehouse: "warehouse",
+    forest: "forest",
+    apartment: "apartment",
+    studio: "studio",
+    park: "park",
+    lobby: "lobby",
+  }
+
+  const preset = (presetMap[environment] || "city") as any
+
+  return <Environment preset={preset} />
+}
+
+// ─── Post Processing ─────────────────────────────────────────────────────────
+
+function PostProcessing() {
+  return (
+    <EffectComposer>
+      <Bloom
+        luminanceThreshold={0.6}
+        luminanceSmoothing={0.9}
+        intensity={0.4}
+      />
+      <Vignette offset={0.3} darkness={0.7} />
+    </EffectComposer>
+  )
+}
+
+// ─── Responsive Camera ───────────────────────────────────────────────────────
+
+function ResponsiveCamera() {
+  const { camera, size } = useThree()
+
+  useEffect(() => {
+    const perspCam = camera as THREE.PerspectiveCamera
+    if (size.width < 640) {
+      // Mobile: pull camera back further
+      perspCam.position.set(0, 0.5, 5.5)
+      perspCam.fov = 50
+    } else if (size.width < 1024) {
+      // Tablet
+      perspCam.position.set(0, 0.5, 4.5)
+      perspCam.fov = 47
+    } else {
+      // Desktop
+      perspCam.position.set(0, 0.5, 4)
+      perspCam.fov = 45
+    }
+    perspCam.updateProjectionMatrix()
+  }, [camera, size])
+
+  return null
+}
+
 // ─── Canvas ───────────────────────────────────────────────────────────────────
 
 export default function NovaScene() {
@@ -286,30 +460,38 @@ export default function NovaScene() {
     <div className="w-full h-screen bg-transparent pointer-events-auto">
       <Canvas camera={{ position: [0, 0.5, 4], fov: 45 }} shadows>
         <DynamicLighting />
+        <ResponsiveCamera />
 
         <Suspense fallback={null}>
-          {/* NO group wrapper here — Center handles positioning */}
           <NovaModel />
 
+          <GroundGrid />
+
           <ContactShadows
-            position={[0, BASE_Y, 0]} // BASE_Y = -1.0, so shadows at y=-1
+            position={[0, BASE_Y, 0]}
             opacity={0.5}
             scale={8}
             blur={2}
             far={4}
           />
 
-          <Environment preset="city" />
+          <SceneEnvironment />
         </Suspense>
+
+        <PostProcessing />
 
         <OrbitControls
           makeDefault
-          target={[0, CAMERA_TARGET_Y, 0]} // Keep robot centered vertically behind mic
+          target={[0, CAMERA_TARGET_Y, 0]}
           enablePan={false}
-          enableRotate={false}
+          enableRotate={true}
           enableZoom={true}
           minDistance={2}
           maxDistance={7}
+          minPolarAngle={Math.PI / 4}
+          maxPolarAngle={Math.PI / 1.8}
+          minAzimuthAngle={-Math.PI / 4}
+          maxAzimuthAngle={Math.PI / 4}
         />
       </Canvas>
     </div>
