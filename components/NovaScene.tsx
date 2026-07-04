@@ -3,13 +3,13 @@
 import { Canvas, useFrame, useThree } from "@react-three/fiber"
 import {
   OrbitControls,
-  Environment,
+  PerspectiveCamera,
   ContactShadows,
   useGLTF,
   useAnimations,
 } from "@react-three/drei"
 import { EffectComposer, Bloom, Vignette } from "@react-three/postprocessing"
-import { useEffect, useRef, useMemo, Suspense, useCallback } from "react"
+import { useEffect, useRef, useMemo, Suspense } from "react"
 import * as THREE from "three"
 import { useNovaStore } from "@/store/useNovaStore"
 import type { Emotion, EnvironmentPreset } from "@/lib/types"
@@ -382,8 +382,10 @@ function GroundGrid() {
   return (
     <gridHelper
       ref={gridRef}
-      args={[20, 40, "#06b6d420", "#06b6d410"]}
+      args={[20, 40, 0x06b6d4, 0x06b6d4]}
       position={[0, BASE_Y - 0.01, 0]}
+      material-opacity={0.12}
+      material-transparent={true}
     />
   )
 }
@@ -393,23 +395,106 @@ function GroundGrid() {
 function SceneEnvironment() {
   const environment = useNovaStore((s) => s.environment)
 
-  // Map our preset names to drei Environment presets
-  const presetMap: Record<string, string> = {
-    city: "city",
-    sunset: "sunset",
-    dawn: "dawn",
-    night: "night",
-    warehouse: "warehouse",
-    forest: "forest",
-    apartment: "apartment",
-    studio: "studio",
-    park: "park",
-    lobby: "lobby",
-  }
+  const config = useMemo(() => {
+    const presets: Record<
+      EnvironmentPreset,
+      {
+        background: string
+        fog: string
+        primary: string
+        secondary: string
+        intensity: number
+      }
+    > = {
+      city: {
+        background: "#020617",
+        fog: "#031728",
+        primary: "#06b6d4",
+        secondary: "#a855f7",
+        intensity: 1.2,
+      },
+      sunset: {
+        background: "#120911",
+        fog: "#3b1021",
+        primary: "#f97316",
+        secondary: "#fbbf24",
+        intensity: 1.35,
+      },
+      dawn: {
+        background: "#07111f",
+        fog: "#16324a",
+        primary: "#67e8f9",
+        secondary: "#c4b5fd",
+        intensity: 1.1,
+      },
+      night: {
+        background: "#02030a",
+        fog: "#050816",
+        primary: "#6366f1",
+        secondary: "#22d3ee",
+        intensity: 0.9,
+      },
+      warehouse: {
+        background: "#070a0d",
+        fog: "#111827",
+        primary: "#94a3b8",
+        secondary: "#06b6d4",
+        intensity: 1,
+      },
+      forest: {
+        background: "#030d0a",
+        fog: "#064e3b",
+        primary: "#34d399",
+        secondary: "#22d3ee",
+        intensity: 1.05,
+      },
+      apartment: {
+        background: "#0f1014",
+        fog: "#1f2937",
+        primary: "#e5e7eb",
+        secondary: "#38bdf8",
+        intensity: 1.15,
+      },
+      studio: {
+        background: "#08090d",
+        fog: "#18181b",
+        primary: "#f8fafc",
+        secondary: "#06b6d4",
+        intensity: 1.4,
+      },
+      park: {
+        background: "#07120f",
+        fog: "#14532d",
+        primary: "#86efac",
+        secondary: "#38bdf8",
+        intensity: 1.1,
+      },
+      lobby: {
+        background: "#080814",
+        fog: "#172554",
+        primary: "#60a5fa",
+        secondary: "#22d3ee",
+        intensity: 1.25,
+      },
+    }
 
-  const preset = (presetMap[environment] || "city") as any
+    return presets[environment]
+  }, [environment])
 
-  return <Environment preset={preset} />
+  return (
+    <>
+      <color attach="background" args={[config.background]} />
+      <fog attach="fog" args={[config.fog, 5, 16]} />
+      <hemisphereLight
+        args={[config.primary, config.background, 0.45 * config.intensity]}
+      />
+      <pointLight
+        position={[-3, 2.5, -3]}
+        intensity={0.55 * config.intensity}
+        color={config.secondary}
+      />
+    </>
+  )
 }
 
 // ─── Post Processing ─────────────────────────────────────────────────────────
@@ -430,27 +515,21 @@ function PostProcessing() {
 // ─── Responsive Camera ───────────────────────────────────────────────────────
 
 function ResponsiveCamera() {
-  const { camera, size } = useThree()
+  const size = useThree((state) => state.size)
 
-  useEffect(() => {
-    const perspCam = camera as THREE.PerspectiveCamera
+  const cameraSettings = useMemo(() => {
     if (size.width < 640) {
-      // Mobile: pull camera back further
-      perspCam.position.set(0, 0.5, 5.5)
-      perspCam.fov = 50
-    } else if (size.width < 1024) {
-      // Tablet
-      perspCam.position.set(0, 0.5, 4.5)
-      perspCam.fov = 47
-    } else {
-      // Desktop
-      perspCam.position.set(0, 0.5, 4)
-      perspCam.fov = 45
+      return { position: [0, 0.5, 5.5] as [number, number, number], fov: 50 }
     }
-    perspCam.updateProjectionMatrix()
-  }, [camera, size])
 
-  return null
+    if (size.width < 1024) {
+      return { position: [0, 0.5, 4.5] as [number, number, number], fov: 47 }
+    }
+
+    return { position: [0, 0.5, 4] as [number, number, number], fov: 45 }
+  }, [size.width])
+
+  return <PerspectiveCamera makeDefault {...cameraSettings} />
 }
 
 // ─── Canvas ───────────────────────────────────────────────────────────────────

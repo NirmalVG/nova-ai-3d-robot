@@ -84,24 +84,22 @@ function CollapsibleSection({
 // ─── Main Panel ──────────────────────────────────────────────────────────────
 
 export default function ConfigurationPanel() {
-  const {
-    showSettings,
-    toggleSettings,
-    personality,
-    setPersonality,
-    emotionalState,
-    materialColor,
-    setMaterialColor,
-    robotScale,
-    setRobotScale,
-    voiceSettings,
-    setVoiceSettings,
-    environment,
-    setEnvironment,
-    userFacts,
-    conversationHistory,
-    clearHistory,
-  } = useNovaStore()
+  const showSettings = useNovaStore((s) => s.showSettings)
+  const toggleSettings = useNovaStore((s) => s.toggleSettings)
+  const personality = useNovaStore((s) => s.personality)
+  const setPersonality = useNovaStore((s) => s.setPersonality)
+  const emotionalState = useNovaStore((s) => s.emotionalState)
+  const materialColor = useNovaStore((s) => s.materialColor)
+  const setMaterialColor = useNovaStore((s) => s.setMaterialColor)
+  const robotScale = useNovaStore((s) => s.robotScale)
+  const setRobotScale = useNovaStore((s) => s.setRobotScale)
+  const voiceSettings = useNovaStore((s) => s.voiceSettings)
+  const setVoiceSettings = useNovaStore((s) => s.setVoiceSettings)
+  const environment = useNovaStore((s) => s.environment)
+  const setEnvironment = useNovaStore((s) => s.setEnvironment)
+  const userFacts = useNovaStore((s) => s.userFacts)
+  const conversationHistory = useNovaStore((s) => s.conversationHistory)
+  const clearHistory = useNovaStore((s) => s.clearHistory)
 
   // ── Voice list from Web Speech API ──────────────────────────────────────
 

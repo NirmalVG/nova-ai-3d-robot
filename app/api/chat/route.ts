@@ -76,8 +76,6 @@ ${userContext}`
 const GEMINI_MODELS = [
   "gemini-2.0-flash",
   "gemini-2.0-flash-lite",
-  "gemini-1.5-flash",
-  "gemini-1.5-flash-8b",
 ]
 
 function toGeminiMessages(messages: ChatMessage[]) {
@@ -183,14 +181,23 @@ async function callGroq(
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
-    const { messages, personality, userFacts } = body
+    const { messages: rawMessages, personality, userFacts } = body
 
-    if (!messages || !personality) {
+    if (!rawMessages || !personality) {
       return NextResponse.json(
         { text: "Missing request data." },
         { status: 400 },
       )
     }
+
+    // Sanitize messages — strip emotion, timestamp, and any other extra props
+    // that AI providers don't support
+    const messages: ChatMessage[] = rawMessages.map(
+      (m: Record<string, unknown>) => ({
+        role: m.role as "user" | "assistant",
+        content: String(m.content || ""),
+      }),
+    )
 
     const systemPrompt = buildSystemPrompt(personality, userFacts)
     console.log(`📨 Nova brain called — ${messages.length} messages in history`)
@@ -199,7 +206,7 @@ export async function POST(req: NextRequest) {
     try {
       const text = await callGemini(messages, systemPrompt)
       return NextResponse.json({ text, provider: "gemini" })
-    } catch (geminiErr) {
+    } catch (_geminiErr) {
       console.warn("⚠️  All Gemini models failed, falling back to Groq")
     }
 

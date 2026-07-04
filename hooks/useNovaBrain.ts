@@ -76,18 +76,14 @@ function extractUserFacts(
 }
 
 export function useNovaBrain() {
-  const {
-    setCurrentState,
-    setCurrentProvider,
-    setTranscripts,
-    setEmotionalState,
-    setUserFacts,
-    personality,
-    conversationHistory,
-    voiceSettings,
-    userFacts,
-    addToHistory,
-  } = useNovaStore()
+  const setCurrentState = useNovaStore((s) => s.setCurrentState)
+  const setCurrentProvider = useNovaStore((s) => s.setCurrentProvider)
+  const setTranscripts = useNovaStore((s) => s.setTranscripts)
+  const setEmotionalState = useNovaStore((s) => s.setEmotionalState)
+  const setUserFacts = useNovaStore((s) => s.setUserFacts)
+  const personality = useNovaStore((s) => s.personality)
+  const conversationHistory = useNovaStore((s) => s.conversationHistory)
+  const addToHistory = useNovaStore((s) => s.addToHistory)
 
   const recognitionRef = useRef<any>(null)
   const voicesRef = useRef<SpeechSynthesisVoice[]>([])
